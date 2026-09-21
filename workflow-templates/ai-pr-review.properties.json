@@ -1,0 +1,9 @@
+{
+  "name": "AI PR Review",
+  "description": "Reviews every pull request with DeepSeek and posts the findings as a comment. Needs the DEEPSEEK_API_KEY secret (organisation secret recommended).",
+  "iconName": "octicon-git-pull-request",
+  "categories": [
+    "Code reviews",
+    "Automation"
+  ]
+}

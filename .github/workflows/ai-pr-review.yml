@@ -1,0 +1,166 @@
+# AI PR review, reusable across every repository in the organisation.
+#
+# A repository adopts it with twelve lines — or by picking "AI PR Review" from
+# Actions > New workflow, which lists workflow-templates/ from this repository:
+#
+#   name: AI PR Review
+#   on:
+#     pull_request_target:
+#       types: [opened, synchronize, reopened]
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#   jobs:
+#     review:
+#       uses: Mazaal-AI/.github/.github/workflows/ai-pr-review.yml@main
+#       secrets: inherit
+#
+# DESIGN: pull-request code is never checked out and never executed. The diff is
+# fetched through the API and consumed as data, so this is safe to run on a
+# self-hosted runner that holds the DEEPSEEK_API_KEY. That is what makes one
+# shared reviewer possible: the trust boundary is the source branch, not the
+# runner.
+name: AI PR Review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runner-labels:
+        description: >-
+          JSON array of runner labels for both jobs. Defaults to the
+          organisation's self-hosted review pool. A public repository should
+          pass ["ubuntu-latest"]: the jobs cannot execute fork code, but there
+          is no reason to put public traffic on a private machine.
+        required: false
+        type: string
+        default: '["self-hosted","linux","x64","ai-review"]'
+      script-ref:
+        description: Ref of this repository to take scripts/ai_pr_review.py from.
+        required: false
+        type: string
+        default: main
+    secrets:
+      DEEPSEEK_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # Same-repository PRs only. The trust boundary is the source branch: a fork
+    # can drive this job's diff, and while the diff is only ever data, the job
+    # holds a live API key and a write-capable token. Fork PRs get the explicit
+    # notice job below instead of a silent skip.
+    #
+    # Drafts are reviewed deliberately. Gating on draft == false moves the
+    # review to exactly the moment it is least useful, and the skipped job
+    # reports as "skipped", which reads like a pass.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ fromJSON(inputs.runner-labels) }}
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout the review script
+        # Only the reviewer is checked out — never the pull request. Pinned by
+        # input so a repository can hold the reviewer at a known ref.
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/.github
+          ref: ${{ inputs.script-ref }}
+          path: .ai-review
+          fetch-depth: 1
+
+      # The system Python on Ubuntu 24.04 is externally managed, so pip refuses
+      # to install into it. A toolcache Python keeps the dependency install
+      # working on any runner without a hand-built virtualenv.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependency
+        run: python -m pip install --upgrade pip openai
+
+      - name: Fetch the PR diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr diff "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" > pr.diff
+
+      - name: Review the diff
+        id: review
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          python .ai-review/scripts/ai_pr_review.py \
+            --diff pr.diff \
+            --output review.md
+
+      - name: Post the review as a PR comment
+        # Runs on success and failure, but not on cancellation. The script
+        # writes a failure artifact and exits non-zero when the model returns
+        # nothing; without this the run would go red with no comment at all.
+        #
+        # The bare-message branch is gated on THIS step having failed, so a
+        # failure in checkout or the dependency install is not misattributed to
+        # the review in a public comment.
+        if: always() && !cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f review.md ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" \
+              --repo "${{ github.repository }}" \
+              --body-file review.md
+          elif [ "${{ steps.review.outcome }}" = "failure" ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" \
+              --repo "${{ github.repository }}" \
+              --body "The review step failed before writing any output. See the workflow log for this run."
+          fi
+
+  # A job-level `if` that evaluates false reports the check as "skipped", which
+  # reads like a pass. Fork PRs get an explicit signal instead. Nothing from the
+  # fork is checked out here either — this only posts a comment.
+  fork-notice:
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ${{ fromJSON(inputs.runner-labels) }}
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Record that automated review did not run
+        # Upsert, not append: this job runs on `synchronize` too, so a fork PR
+        # with several pushes would otherwise collect one identical comment per
+        # push. The match is author-scoped AND anchored to the start of the
+        # body — a marker alone proves nothing, and the review bot quotes diffs,
+        # so a substring match could PATCH a review instead of the notice.
+        #
+        # `set -e` matters: without it a failed lookup leaves EXISTING empty,
+        # the else branch fires, and a duplicate notice is created — the exact
+        # outcome the upsert exists to prevent.
+        run: |
+          set -euo pipefail
+
+          MARKER="<!-- ai-review-fork-notice -->"
+          BODY="$MARKER
+
+          **Automated review did not run on this PR.** It comes from a fork, and the review job is restricted to same-repository branches because it runs on a self-hosted runner with access to secrets. It needs a human reviewer.
+
+          To get an automated review, a maintainer can push these commits to a branch in this repository and open a PR from there."
+
+          REPO="${{ github.repository }}"
+          NUM="${{ github.event.pull_request.number }}"
+
+          EXISTING=$(gh api "repos/$REPO/issues/$NUM/comments" --paginate \
+            --jq "[.[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$MARKER\"))) | .id][0] // empty")
+
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -f body="$BODY" > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$NUM/comments" -f body="$BODY" > /dev/null
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
