@@ -28,8 +28,31 @@ jobs:
     secrets: inherit
 ```
 
-The repository needs `DEEPSEEK_API_KEY` available — an organisation secret
-covers every repository at once, which is the point of this setup.
+## Secret
+
+Each repository needs `DEEPSEEK_API_KEY` as a **repository** secret:
+
+```
+gh secret set DEEPSEEK_API_KEY --repo Mazaal-AI/<repository>
+```
+
+An organisation secret with visibility `all` is also configured, and the
+REST API reports it as available to every repository — but it does not
+reach a workflow on this plan. Without the repository secret, the calling
+job fails at evaluation time, before a runner is ever assigned:
+
+```
+Error when evaluating 'secrets'. .github/workflows/ai-pr-review.yml
+(Line: 22, Col: 11): Secret DEEPSEEK_API_KEY is required, but not
+provided while calling.
+```
+
+Measured 2026-09-21: `secrets: inherit` and an explicit
+`secrets: DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}` both fail the
+same way with only the organisation secret present, and both succeed once
+the repository secret exists. Organisation secrets for private
+repositories need a paid plan; if the organisation moves to Team, the
+organisation secret starts working and these per-repository ones can go.
 
 ## Runners
 
