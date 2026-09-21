@@ -53,3 +53,5 @@ self-hosted machine, but public traffic does not belong on a private box.
   "no automated review" comment instead of a silent skip.
 - The reviewer script is checked out from this repository at a pinned ref, so a
   pull request cannot alter the reviewer that judges it.
+
+<!-- smoke test for the shared reviewer -->
