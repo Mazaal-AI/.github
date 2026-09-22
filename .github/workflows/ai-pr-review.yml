@@ -59,7 +59,20 @@ jobs:
     # reports as "skipped", which reads like a pass.
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ fromJSON(inputs.runner-labels) }}
-    timeout-minutes: 10
+    # The review step is one API call per diff part, run sequentially, and it is
+    # the whole cost of the job: setup, checkout, the diff fetch and the comment
+    # together take about five seconds. Measured at roughly three minutes per
+    # part on a 120k-character prompt, so ten minutes covered a two-part review
+    # and cancelled a three-part one at the buzzer — which is what a large pull
+    # request splits into. Twenty leaves room for the common case without holding
+    # a shared runner for the best part of an hour.
+    #
+    # Deliberately not sized to MAX_REVIEW_PARTS in scripts/ai_pr_review.py:
+    # twelve parts would need roughly 36 minutes, and how much runner time a very
+    # large pull request may claim on a shared pool is a policy decision rather
+    # than a number to pick here. A diff needing more parts than this covers is
+    # reviewed in part, and the summary names the parts it skipped.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout the review script
